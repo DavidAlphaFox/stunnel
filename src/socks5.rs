@@ -1,6 +1,6 @@
-use async_std::net::TcpStream;
-use async_std::prelude::*;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use tokio::net::TcpStream;
+use tokio::prelude::*;
 
 const VER: u8 = 5;
 const RSV: u8 = 0;

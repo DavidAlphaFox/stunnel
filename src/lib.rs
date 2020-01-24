@@ -7,6 +7,7 @@ extern crate crypto;
 extern crate futures_timer;
 extern crate rand;
 extern crate time;
+extern crate tokio;
 
 pub mod client;
 pub mod cryptor;

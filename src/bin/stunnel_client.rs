@@ -1,8 +1,9 @@
 #[macro_use]
 extern crate log;
-extern crate async_std;
+extern crate futures;
 extern crate getopts;
 extern crate stunnel;
+extern crate tokio;
 
 use std::env;
 use std::net::Shutdown;
@@ -10,22 +11,23 @@ use std::net::ToSocketAddrs;
 use std::str::from_utf8;
 use std::vec::Vec;
 
-use async_std::net::TcpListener;
-use async_std::net::TcpStream;
-use async_std::prelude::*;
-use async_std::task;
+use tokio::net::{tcp::ReadHalf, tcp::WriteHalf, TcpListener, TcpStream};
+use tokio::prelude::*;
+use tokio::stream::StreamExt;
+
+use futures::join;
 
 use stunnel::client::*;
 use stunnel::cryptor::Cryptor;
 use stunnel::logger;
 use stunnel::socks5;
 
-async fn process_read(stream: &mut &TcpStream, write_port: &TunnelWritePort) {
+async fn process_read(mut stream: ReadHalf<'_>, write_port: &TunnelWritePort) {
     loop {
         let mut buf = vec![0; 1024];
         match stream.read(&mut buf).await {
             Ok(0) => {
-                let _ = stream.shutdown(Shutdown::Read);
+                let _ = stream.as_ref().shutdown(Shutdown::Read);
                 write_port.shutdown_write().await;
                 break;
             }
@@ -36,7 +38,7 @@ async fn process_read(stream: &mut &TcpStream, write_port: &TunnelWritePort) {
             }
 
             Err(_) => {
-                let _ = stream.shutdown(Shutdown::Both);
+                let _ = stream.as_ref().shutdown(Shutdown::Both);
                 write_port.close().await;
                 break;
             }
@@ -44,24 +46,24 @@ async fn process_read(stream: &mut &TcpStream, write_port: &TunnelWritePort) {
     }
 }
 
-async fn process_write(stream: &mut &TcpStream, read_port: &TunnelReadPort) {
+async fn process_write(mut stream: WriteHalf<'_>, read_port: &TunnelReadPort) {
     loop {
         let buf = match read_port.read().await {
             TunnelPortMsg::Data(buf) => buf,
 
             TunnelPortMsg::ShutdownWrite => {
-                let _ = stream.shutdown(Shutdown::Write);
+                let _ = stream.as_ref().shutdown(Shutdown::Write);
                 break;
             }
 
             _ => {
-                let _ = stream.shutdown(Shutdown::Both);
+                let _ = stream.as_ref().shutdown(Shutdown::Both);
                 break;
             }
         };
 
         if stream.write_all(&buf).await.is_err() {
-            let _ = stream.shutdown(Shutdown::Both);
+            let _ = stream.as_ref().shutdown(Shutdown::Both);
             break;
         }
     }
@@ -102,10 +104,10 @@ async fn run_tunnel_port(
     };
 
     if success {
-        let (reader, writer) = &mut (&stream, &stream);
-        let r = process_read(reader, &write_port);
-        let w = process_write(writer, &read_port);
-        let _ = r.join(w).await;
+        let (read_half, write_half) = stream.split();
+        let r = process_read(read_half, &write_port);
+        let w = process_write(write_half, &read_port);
+        let _ = join!(r, w);
     } else {
         let _ = stream.shutdown(Shutdown::Both);
     }
@@ -114,50 +116,49 @@ async fn run_tunnel_port(
     write_port.drop().await;
 }
 
-fn run_tunnels(
+async fn run_tunnels(
     listen_addr: String,
     server_addr: String,
     count: u32,
     key: Vec<u8>,
     enable_ucp: bool,
 ) {
-    task::block_on(async move {
-        let mut tunnels = Vec::new();
-        if enable_ucp {
-            let tunnel = UcpTunnel::new(0, server_addr.clone(), key.clone());
+    let mut tunnels = Vec::new();
+    if enable_ucp {
+        let tunnel = UcpTunnel::new(0, server_addr.clone(), key.clone());
+        tunnels.push(tunnel);
+    } else {
+        for i in 0..count {
+            let tunnel = TcpTunnel::new(i, server_addr.clone(), key.clone());
             tunnels.push(tunnel);
-        } else {
-            for i in 0..count {
-                let tunnel = TcpTunnel::new(i, server_addr.clone(), key.clone());
-                tunnels.push(tunnel);
-            }
         }
+    }
 
-        let mut index = 0;
-        let listener = TcpListener::bind(listen_addr.as_str()).await.unwrap();
-        let mut incoming = listener.incoming();
+    let mut index = 0;
+    let mut listener = TcpListener::bind(listen_addr.as_str()).await.unwrap();
+    let mut incoming = listener.incoming();
 
-        while let Some(stream) = incoming.next().await {
-            match stream {
-                Ok(stream) => {
-                    {
-                        let tunnel: &mut Tunnel = tunnels.get_mut(index).unwrap();
-                        let (write_port, read_port) = tunnel.open_port().await;
-                        task::spawn(async move {
-                            run_tunnel_port(stream, read_port, write_port).await;
-                        });
-                    }
-
-                    index = (index + 1) % tunnels.len();
+    while let Some(stream) = incoming.next().await {
+        match stream {
+            Ok(stream) => {
+                {
+                    let tunnel: &mut Tunnel = tunnels.get_mut(index).unwrap();
+                    let (write_port, read_port) = tunnel.open_port().await;
+                    tokio::spawn(async move {
+                        run_tunnel_port(stream, read_port, write_port).await;
+                    });
                 }
 
-                Err(_) => {}
+                index = (index + 1) % tunnels.len();
             }
+
+            Err(_) => {}
         }
-    });
+    }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args: Vec<_> = env::args().collect();
     let program = args[0].clone();
 
@@ -198,5 +199,5 @@ fn main() {
     logger::init(log::Level::Info, log_path, 1, 2000000).unwrap();
     info!("starting up");
 
-    run_tunnels(listen_addr, server_addr, count, key, enable_ucp);
+    run_tunnels(listen_addr, server_addr, count, key, enable_ucp).await;
 }
