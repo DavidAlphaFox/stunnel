@@ -3,8 +3,8 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use async_std::stream::Stream;
 use futures_timer::Delay;
+use tokio::stream::Stream;
 
 pub fn interval<T>(dur: Duration, val: T) -> Interval<T> {
     Interval {

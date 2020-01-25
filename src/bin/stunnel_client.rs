@@ -22,7 +22,7 @@ use stunnel::cryptor::Cryptor;
 use stunnel::logger;
 use stunnel::socks5;
 
-async fn process_read(mut stream: ReadHalf<'_>, write_port: &TunnelWritePort) {
+async fn process_read(mut stream: ReadHalf<'_>, write_port: &mut TunnelWritePort) {
     loop {
         let mut buf = vec![0; 1024];
         match stream.read(&mut buf).await {
@@ -46,7 +46,7 @@ async fn process_read(mut stream: ReadHalf<'_>, write_port: &TunnelWritePort) {
     }
 }
 
-async fn process_write(mut stream: WriteHalf<'_>, read_port: &TunnelReadPort) {
+async fn process_write(mut stream: WriteHalf<'_>, read_port: &mut TunnelReadPort) {
     loop {
         let buf = match read_port.read().await {
             TunnelPortMsg::Data(buf) => buf,
@@ -71,8 +71,8 @@ async fn process_write(mut stream: WriteHalf<'_>, read_port: &TunnelReadPort) {
 
 async fn run_tunnel_port(
     mut stream: TcpStream,
-    read_port: TunnelReadPort,
-    write_port: TunnelWritePort,
+    mut read_port: TunnelReadPort,
+    mut write_port: TunnelWritePort,
 ) {
     match socks5::handshake(&mut stream).await {
         Ok(socks5::Destination::Address(addr)) => {
@@ -105,8 +105,8 @@ async fn run_tunnel_port(
 
     if success {
         let (read_half, write_half) = stream.split();
-        let r = process_read(read_half, &write_port);
-        let w = process_write(write_half, &read_port);
+        let r = process_read(read_half, &mut write_port);
+        let w = process_write(write_half, &mut read_port);
         let _ = join!(r, w);
     } else {
         let _ = stream.shutdown(Shutdown::Both);
